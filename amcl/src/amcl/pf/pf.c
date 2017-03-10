@@ -34,6 +34,8 @@
 #include "pf_pdf.h"
 #include "pf_kdtree.h"
 
+#include "map/map.h"
+
 
 // Compute the required number of samples, given that there are k bins
 // with samples in them.
@@ -331,6 +333,7 @@ void pf_update_resample(pf_t *pf)
   // Build up cumulative probability table for resampling.
   // TODO: Replace this with a more efficient procedure
   // (e.g., http://www.network-theory.co.uk/docs/gslref/GeneralDiscreteDistributions.html)
+  // c[i] is the sum of the weights of samples 0, 1, ..., i-1
   c = (double*)malloc(sizeof(double)*(set_a->sample_count+1));
   c[0] = 0.0;
   for(i=0;i<set_a->sample_count;i++)
@@ -362,8 +365,13 @@ void pf_update_resample(pf_t *pf)
   {
     sample_b = set_b->samples + set_b->sample_count++;
 
+    // With a certain probability, create a sample that is somewhere
+    // in the map to recover from failures.
+    // otherwise (else case) do a "normal" resampling
     if(drand48() < w_diff)
+    {
       sample_b->pose = (pf->random_pose_fn)(pf->random_pose_data);
+    }
     else
     {
       // Can't (easily) combine low-variance sampler with KLD adaptive
@@ -396,11 +404,13 @@ void pf_update_resample(pf_t *pf)
       for(i=0;i<set_a->sample_count;i++)
       {
         if((c[i] <= r) && (r < c[i+1]))
-          break;
+        {
+          break; // we found particle i
+        }
       }
       assert(i<set_a->sample_count);
 
-      sample_a = set_a->samples + i;
+      sample_a = set_a->samples + i; // pointer to sample i in set a
 
       assert(sample_a->weight > 0);
 
@@ -408,7 +418,23 @@ void pf_update_resample(pf_t *pf)
       sample_b->pose = sample_a->pose;
     }
 
-    sample_b->weight = 1.0;
+    // if the pose is in an unknown region of the map, lower the
+    // weight for it a priori
+    // For the value conversion, see AmclNode::convertMap
+    // note: This is not part of the "official" algorithm.
+    map_t* map = (map_t*) pf->random_pose_data;
+    int i,j;
+    i = MAP_GXWX(map, sample_b->pose.v[0]);
+    j = MAP_GYWY(map, sample_b->pose.v[1]);
+    if(MAP_VALID(map,i,j) && (map->cells[MAP_INDEX(map,i,j)].occ_state == 0))
+    {
+      // unknown space (e.g. out of the map)
+      sample_b->weight = 0.9;
+    }
+    else
+    {
+      sample_b->weight = 1;
+    }
     total += sample_b->weight;
 
     // Add sample to histogram
